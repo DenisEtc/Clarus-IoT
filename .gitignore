@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+
+volumes/postgres/
+volumes/rabbitmq/
+
+models/*.pkl
+data/
