@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import csv
-import io
+import os
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_user
+from app.core.config import settings
 from app.models.inference_job import InferenceJob
 from app.models.prediction_summary import PredictionSummary
 from app.models.traffic_file import TrafficFile
 from app.schemas.predictions import PredictionJobOut, PredictionSummaryOut
 from app.services.billing import require_active_subscription
+from app.services.queue import publish_ml_job
 
 router = APIRouter(tags=["predictions"])
 
@@ -23,125 +24,147 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _compute_stub_summary(rows: list[dict]) -> tuple[int, int, float, str, float]:
-    """MVP-заглушка сводки.
-
-    Возвращает:
-      - total_rows
-      - attack_rows / attack_ratio (по 'label'/'attack', если есть)
-      - top_class / top_share (по 'label'/'attack', если есть)
-    """
-    total = len(rows)
-    if total == 0:
-        return 0, 0, 0.0, "unknown", 0.0
-
-    label_key: Optional[str] = None
-    for k in ("label", "attack", "class"):
-        if k in rows[0]:
-            label_key = k
-            break
-
-    if not label_key:
-        return total, 0, 0.0, "unknown", 0.0
-
-    counts: dict[str, int] = {}
-    for r in rows:
-        v = str(r.get(label_key, "")).strip()
-        if not v:
-            continue
-        counts[v] = counts.get(v, 0) + 1
-
-    if not counts:
-        return total, 0, 0.0, "unknown", 0.0
-
-    top_class = max(counts, key=counts.get)
-    top_count = counts[top_class]
-    top_share = top_count / total
-
-    attack_rows = 0
-    for r in rows:
-        v = str(r.get(label_key, "")).strip()
-        lv = v.lower()
-        if lv in ("0", "normal", "benign", "legit", ""):
-            continue
-        attack_rows += 1
-
-    attack_ratio = attack_rows / total if total else 0.0
-    return total, attack_rows, attack_ratio, top_class, top_share
-
-
 @router.post("/upload", response_model=PredictionJobOut)
 def upload_for_prediction(
     csv_file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    # Проверка подписки (иначе нельзя предсказывать)
     require_active_subscription(db, user.id)
 
-    if not csv_file.filename.lower().endswith(".csv"):
+    if not csv_file.filename or not csv_file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported")
 
     raw = csv_file.file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    # Читаем CSV максимально “толерантно”
-    try:
-        text = raw.decode("utf-8", errors="replace")
-        reader = csv.DictReader(io.StringIO(text))
-        rows = [r for r in reader]
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {e}")
+    os.makedirs(settings.uploads_dir, exist_ok=True)
+    safe_name = os.path.basename(csv_file.filename)
+    stored_name = f"{uuid.uuid4()}_{safe_name}"
+    stored_path = os.path.join(settings.uploads_dir, stored_name)
 
-    total_rows, attack_rows, attack_ratio, top_class, top_share = _compute_stub_summary(rows)
+    try:
+        with open(stored_path, "wb") as f:
+            f.write(raw)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to store file: {e}")
+
     now = _utcnow()
 
-    # 1) TrafficFile (под реальные колонки модели)
     tf = TrafficFile(
         user_id=user.id,
-        original_filename=csv_file.filename,
-        stored_path=f"uploads/{uuid.uuid4()}_{csv_file.filename}",
-        rows_count=total_rows,
+        original_filename=safe_name,
+        stored_path=stored_path,
+        rows_count=None,
         created_at=now,
     )
     db.add(tf)
     db.commit()
     db.refresh(tf)
 
-    # 2) InferenceJob (под реальные колонки модели)
     job = InferenceJob(
         user_id=user.id,
         file_id=tf.id,
-        status="finished",
+        status="queued",
         created_at=now,
-        started_at=now,
-        finished_at=now,
+        started_at=None,
+        finished_at=None,
         error_message=None,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    # 3) PredictionSummary (под реальные колонки модели)
-    ps = PredictionSummary(
-        job_id=job.id,
-        rows_scored=total_rows,
-        attack_share=attack_ratio,
-        top_class=top_class,
-        top_class_share=top_share,
-        created_at=now,
-    )
-    db.add(ps)
-    db.commit()
-    db.refresh(ps)
+    publish_ml_job(job_id=str(job.id))
 
     return PredictionJobOut(
         job_id=job.id,
         status=job.status,
         summary=PredictionSummaryOut(
-            total_rows=total_rows,
+            total_rows=0,
+            attack_rows=0,
+            attack_ratio=0.0,
+            top_class=None,
+            top_class_share=None,
+        ),
+    )
+
+
+@router.get("/{job_id}", response_model=PredictionJobOut)
+def get_prediction_job(
+    job_id: uuid.UUID,
+    response: Response,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    job = (
+        db.query(InferenceJob)
+        .filter(InferenceJob.id == job_id, InferenceJob.user_id == user.id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # If failed, provide diagnostic in header (does not break response schema)
+    if job.status == "failed" and job.error_message:
+        # shorten header size a bit
+        msg = job.error_message.replace("\n", " ")[:800]
+        response.headers["X-Job-Error"] = msg
+
+    summary = db.query(PredictionSummary).filter(PredictionSummary.job_id == job.id).first()
+
+    if summary:
+        total = int(summary.rows_scored or 0)
+        attack_rows = int(summary.attack_rows or 0)
+        attack_ratio = float(summary.attack_share or 0.0)
+
+        out_summary = PredictionSummaryOut(
+            total_rows=total,
             attack_rows=attack_rows,
             attack_ratio=attack_ratio,
-        ),
+            top_class=summary.top_class,
+            top_class_share=float(summary.top_class_share) if summary.top_class_share is not None else None,
+        )
+    else:
+        out_summary = PredictionSummaryOut(
+            total_rows=0,
+            attack_rows=0,
+            attack_ratio=0.0,
+            top_class=None,
+            top_class_share=None,
+        )
+
+    return PredictionJobOut(job_id=job.id, status=job.status, summary=out_summary)
+
+
+@router.get("/{job_id}/download")
+def download_scored_csv(
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    job = (
+        db.query(InferenceJob)
+        .filter(InferenceJob.id == job_id, InferenceJob.user_id == user.id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status != "done":
+        raise HTTPException(status_code=409, detail=f"Job is not done (status={job.status})")
+
+    summary = db.query(PredictionSummary).filter(PredictionSummary.job_id == job.id).first()
+    if not summary or not summary.scored_path:
+        raise HTTPException(status_code=404, detail="Scored file not found")
+
+    if not os.path.exists(summary.scored_path):
+        raise HTTPException(status_code=404, detail="Scored file missing on disk (uploads volume?)")
+
+    filename = os.path.basename(summary.scored_path)
+    return FileResponse(
+        path=summary.scored_path,
+        media_type="text/csv",
+        filename=filename,
     )

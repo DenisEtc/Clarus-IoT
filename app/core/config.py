@@ -1,72 +1,51 @@
 from __future__ import annotations
 
-from typing import Optional
-
-from pydantic import Field, AliasChoices, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """App settings.
-
-    Supports both:
-      - DATABASE_URL / JWT_SECRET_KEY (single variables)
-    and a split docker-compose style:
-      - POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_HOST/POSTGRES_PORT/POSTGRES_DB
-      - JWT_SECRET
+    """
+    Важно:
+    - extra="ignore" нужен, чтобы POSTGRES_DB/USER/PASSWORD (и другие переменные)
+      не валили worker/app, даже если мы их не используем напрямую в коде.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    # Database
-    database_url: Optional[str] = Field(
-        default=None,
-        validation_alias=AliasChoices("DATABASE_URL", "database_url"),
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+        # убираем конфликт с protected namespace "model_"
+        protected_namespaces=("settings_",),
     )
 
-    postgres_user: str = Field(
-        default="clarus",
-        validation_alias=AliasChoices("POSTGRES_USER"),
-    )
-    postgres_password: str = Field(
-        default="clarus",
-        validation_alias=AliasChoices("POSTGRES_PASSWORD"),
-    )
-    postgres_host: str = Field(
-        default="database",
-        validation_alias=AliasChoices("POSTGRES_HOST"),
-    )
-    postgres_port: int = Field(
-        default=5432,
-        validation_alias=AliasChoices("POSTGRES_PORT"),
-    )
-    postgres_db: str = Field(
-        default="clarus",
-        validation_alias=AliasChoices("POSTGRES_DB"),
+    # DB
+    database_url: str = Field(
+        default="postgresql+psycopg://clarus:clarus_password@database:5432/clarus",
+        alias="DATABASE_URL",
     )
 
-    # JWT
-    jwt_secret_key: str = Field(
-        default="CHANGE_ME_SUPER_SECRET",
-        validation_alias=AliasChoices("JWT_SECRET_KEY", "JWT_SECRET", "jwt_secret_key"),
-    )
-    jwt_algorithm: str = Field(
-        default="HS256",
-        validation_alias=AliasChoices("JWT_ALGORITHM", "jwt_algorithm"),
-    )
-    access_token_expire_minutes: int = Field(
-        default=60,
-        validation_alias=AliasChoices("ACCESS_TOKEN_EXPIRE_MINUTES", "access_token_expire_minutes"),
-    )
+    # Auth/JWT
+    jwt_secret_key: str = Field(default="CHANGE_ME", alias="JWT_SECRET_KEY")
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    access_token_expire_minutes: int = Field(default=1440, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
 
-    @model_validator(mode="after")
-    def _assemble_database_url(self) -> "Settings":
-        if not self.database_url:
-            self.database_url = (
-                f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
-                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-            )
-        return self
+    # RabbitMQ
+    rabbitmq_url: str = Field(default="amqp://guest:guest@rabbitmq:5672/", alias="RABBITMQ_URL")
+    ml_queue_name: str = Field(default="ml_jobs", alias="ML_QUEUE_NAME")
+
+    # Paths
+    model_dir: str = Field(default="/data/models", alias="MODEL_DIR")
+    uploads_dir: str = Field(default="/data/uploads", alias="UPLOADS_DIR")
+
+    # Models (XGBoost)
+    xgb_bin_path: str = Field(default="/data/models/xgb_bin.json", alias="XGB_BIN_PATH")
+    xgb_multi_path: str = Field(default="/data/models/xgb_multi.json", alias="XGB_MULTI_PATH")
+
+    xgb_class_mapping_path: str = Field(default="/data/models/class_mapping.json", alias="XGB_CLASS_MAPPING_PATH")
+    xgb_features_bin_path: str = Field(default="/data/models/features_bin.json", alias="XGB_FEATURES_BIN_PATH")
+    xgb_features_multi_path: str = Field(default="/data/models/features_multi.json", alias="XGB_FEATURES_MULTI_PATH")
 
 
 settings = Settings()

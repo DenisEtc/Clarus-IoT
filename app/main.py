@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 from app.api.auth import router as auth_router
 from app.api.billing import router as billing_router
@@ -11,6 +12,12 @@ app.include_router(billing_router, prefix="/billing", tags=["billing"])
 app.include_router(predictions_router, prefix="/predictions", tags=["predictions"])
 
 
-@app.get("/health")
+@app.get("/", include_in_schema=False)
+def root():
+    # чтобы curl http://localhost/ не был 404:
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/health", tags=["health"])
 def health():
     return {"status": "ok"}

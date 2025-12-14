@@ -1,0 +1,19 @@
+[
+  "sport",
+  "dport",
+  "pkts",
+  "bytes",
+  "dur",
+  "mean",
+  "stddev",
+  "sum",
+  "min",
+  "max",
+  "spkts",
+  "dpkts",
+  "sbytes",
+  "dbytes",
+  "rate",
+  "srate",
+  "drate"
+]
