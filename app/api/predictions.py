@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.models.inference_job import InferenceJob
 from app.models.prediction_summary import PredictionSummary
 from app.models.traffic_file import TrafficFile
-from app.schemas.predictions import PredictionJobOut, PredictionSummaryOut
+from app.schemas.predictions import PredictionJobOut, PredictionJobListItemOut, PredictionSummaryOut
 from app.services.billing import require_active_subscription
 from app.services.queue import publish_ml_job
 
@@ -89,6 +89,74 @@ def upload_for_prediction(
             top_class_share=None,
         ),
     )
+
+
+@router.get("/jobs", response_model=list[PredictionJobListItemOut])
+def list_prediction_jobs(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Return user's jobs for the dashboard/history.
+
+    Important: this route must be declared before /{job_id} to avoid "jobs" being
+    captured by the UUID path parameter.
+    """
+
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+
+    rows = (
+        db.query(InferenceJob, TrafficFile, PredictionSummary)
+        .join(TrafficFile, TrafficFile.id == InferenceJob.file_id)
+        .outerjoin(PredictionSummary, PredictionSummary.job_id == InferenceJob.id)
+        .filter(InferenceJob.user_id == user.id)
+        .order_by(InferenceJob.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    out: list[PredictionJobListItemOut] = []
+
+    for job, tf, summary in rows:
+        if summary:
+            total = int(summary.rows_scored or 0)
+            attack_rows = int(summary.attack_rows or 0)
+            attack_ratio = float(summary.attack_share or 0.0)
+
+            out_summary = PredictionSummaryOut(
+                total_rows=total,
+                attack_rows=attack_rows,
+                attack_ratio=attack_ratio,
+                top_class=summary.top_class,
+                top_class_share=float(summary.top_class_share)
+                if summary.top_class_share is not None
+                else None,
+            )
+        else:
+            out_summary = PredictionSummaryOut(
+                total_rows=0,
+                attack_rows=0,
+                attack_ratio=0.0,
+                top_class=None,
+                top_class_share=None,
+            )
+
+        created_iso = job.created_at.isoformat() if getattr(job, "created_at", None) else None
+
+        out.append(
+            PredictionJobListItemOut(
+                job_id=job.id,
+                status=job.status,
+                summary=out_summary,
+                created_at=created_iso,
+                original_filename=getattr(tf, "original_filename", None),
+            )
+        )
+
+    return out
 
 
 @router.get("/{job_id}", response_model=PredictionJobOut)

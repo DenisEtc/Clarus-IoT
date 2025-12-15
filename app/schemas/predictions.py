@@ -16,3 +16,10 @@ class PredictionJobOut(BaseModel):
     job_id: uuid.UUID
     status: str
     summary: PredictionSummaryOut
+
+
+class PredictionJobListItemOut(PredictionJobOut):
+    """Extended shape for history screens."""
+
+    created_at: str | None = None
+    original_filename: str | None = None

@@ -5,8 +5,14 @@ __pycache__/
 .idea/
 .vscode/
 
+.DS_Store
+**/.DS_Store
+
 volumes/postgres/
 volumes/rabbitmq/
 
 models/*.pkl
 data/
+
+web/node_modules/
+web/dist/
