@@ -6,9 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """
-    Важно:
     - extra="ignore" нужен, чтобы POSTGRES_DB/USER/PASSWORD (и другие переменные)
-      не валили worker/app, даже если мы их не используем напрямую в коде.
+      не валили worker/app, даже если мы их не используем напрямую в коде
     """
 
     model_config = SettingsConfigDict(

@@ -21,7 +21,6 @@ def upgrade() -> None:
     op.add_column("prediction_summaries", sa.Column("attack_rows", sa.Integer(), nullable=False, server_default="0"))
     op.add_column("prediction_summaries", sa.Column("scored_path", sa.String(length=512), nullable=True))
 
-    # optional: уберём server_default после заполнения
     op.alter_column("prediction_summaries", "attack_rows", server_default=None)
 
 
